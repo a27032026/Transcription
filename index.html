@@ -5,13 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#000000">
 <title>即時字幕</title>
-<link rel="manifest" href="manifest.webmanifest">
-<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
-<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="即時字幕">
-<meta name="apple-mobile-web-app-status-bar-style" content="black">
 <style>
   :root {
     --bg: #000;
@@ -130,7 +123,6 @@
   <button id="theme" type="button">黑/白</button>
   <button id="full" type="button">全螢幕</button>
   <button id="save" type="button">下載</button>
-  <button id="install" type="button" hidden>📲 安裝App</button>
 </header>
 <div id="status">按「開始」後允許使用麥克風</div>
 <div id="unsupported">
@@ -230,27 +222,6 @@
     statusEl.classList.toggle('error', !!isError);
   }
 
-  // ---------- installable app ----------
-  if ('serviceWorker' in navigator && location.protocol === 'https:') {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
-  }
-  // Android/Chrome/Edge offer an install prompt; show our button when available.
-  let installPrompt = null;
-  const installBtn = $('install');
-  window.addEventListener('beforeinstallprompt', (e) => {
-    e.preventDefault();
-    installPrompt = e;
-    installBtn.hidden = false;
-  });
-  installBtn.onclick = async () => {
-    if (!installPrompt) return;
-    installPrompt.prompt();
-    try { await installPrompt.userChoice; } catch {}
-    installPrompt = null;
-    installBtn.hidden = true;
-  };
-  window.addEventListener('appinstalled', () => { installBtn.hidden = true; });
-
   // ---------- speech recognition ----------
   if (!SR) {
     $('unsupported').style.display = 'block';
@@ -263,14 +234,19 @@
   let lastResultAt = 0;     // when the recognizer last gave us anything
   let interimSince = 0;     // when the current unfinished sentence began
   let finalizing = false;   // we asked the recognizer to wrap up the current sentence
+  let finalizeAt = 0;       // when we asked
   let everStarted = false;  // the microphone worked at least once this session
   let failCount = 0;        // errors in a row without any recognized speech
 
   // Limits for long, non-stop speech. Browsers wait for a pause before
   // finishing a sentence; if the speaker never pauses, the sentence keeps
   // growing until the recognizer chokes or silently freezes.
-  const MAX_INTERIM_MS = 15000;   // force a line break after 15 s without a pause
-  const MAX_INTERIM_CHARS = 70;   // ...or after ~70 characters
+  // Phones (Android Chrome, iPhone Safari) choke on long continuous sessions,
+  // so on phones we use short sessions and break lines sooner.
+  const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) ||
+    (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.platform));
+  const MAX_INTERIM_MS = isMobile ? 8000 : 15000;  // force a line break after this long without a pause
+  const MAX_INTERIM_CHARS = isMobile ? 40 : 70;    // ...or after this many characters
   const STALL_MS = 5000;          // no updates for 5 s mid-sentence = frozen
   const IDLE_MS = 10000;          // nothing at all for 10 s = possibly frozen; refresh
 
@@ -279,7 +255,7 @@
     rec = me;
     finalizing = false;
     me.lang = 'zh-TW';           // 台灣華語（繁體中文）
-    me.continuous = true;
+    me.continuous = !isMobile;   // phones: one sentence per session, then auto-restart
     me.interimResults = true;
     me.maxAlternatives = 1;
 
@@ -366,6 +342,12 @@
       if (now - lastResultAt > IDLE_MS) restartNow(false);
       return;
     }
+    if (finalizing && now - finalizeAt > 2500) {
+      // We asked the browser to finish the sentence but it ignored us (common on
+      // phones): keep what we have and force a fresh start.
+      restartNow(true);
+      return;
+    }
     if (now - lastResultAt > STALL_MS) {
       // Recognizer froze in the middle of a sentence: keep what we have, restart.
       restartNow(true);
@@ -374,6 +356,7 @@
       // Speaker hasn't paused for a long time: ask the browser to finish this
       // sentence now (it delivers the final text, then onend restarts listening).
       finalizing = true;
+      finalizeAt = now;
       try { rec.stop(); } catch { restartNow(true); }
     }
   }, 1000);
