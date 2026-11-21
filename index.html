@@ -155,7 +155,7 @@
   const interimEl = $('interim'), placeholder = $('placeholder');
 
   // ---------- diagnostic log (open the link with #debug at the end) ----------
-  const VERSION = '2026-11-21 v3';
+  const VERSION = '2026-11-21 v4';
   const DEBUG = /debug/i.test(location.hash + location.search);
   const debugEl = $('debug');
   const logLines = [], t0 = Date.now();
@@ -204,12 +204,12 @@
   function nearBottom() { return main.scrollHeight - main.scrollTop - main.clientHeight < 120; }
   function scrollDown() { main.scrollTop = main.scrollHeight; }
 
-  function addLine(text) {
+  function addLine(text, when) {
     text = text.trim();
     if (!text) return;
     placeholder.remove();
     const stick = nearBottom();
-    const now = new Date();
+    const now = when || new Date();
     lines.push({ time: now, text });
     const p = document.createElement('p');
     p.className = 'line';
@@ -231,13 +231,17 @@
   // stop transcription. Instead, the half-finished sentence on screen is
   // remembered and cut off the front of whatever the recognizer sends next.
   $('clear').onclick = () => {
-    log('▶ 全部清除 pressed, listening=' + (SR && wantRunning) + ', on screen="' + interimEl.textContent + '"');
-    if (SR && wantRunning) skipText = interimEl.textContent.trim();
+    const listening = !!SR && wantRunning;
+    log('▶ 全部清除 pressed, listening=' + listening + ', on screen="' + interimEl.textContent + '"');
+    if (listening) skipText = interimEl.textContent.trim();
     lines.length = 0;
     main.querySelectorAll('.line').forEach((n) => n.remove());
     setInterim('');
     main.insertBefore(placeholder, interimEl);
     main.scrollTop = 0;
+    // iPhone: Safari's speech engine stops working after this, so start over
+    // with a brand-new one (see reloadAndStart below).
+    if (listening && isIOS) reloadAndStart(false, false);
   };
 
   $('save').onclick = () => {
@@ -274,6 +278,32 @@
   let skipText = '';        // text cleared by 全部清除 that the recognizer may still send
   let recCount = 0;         // numbers each recognizer in the diagnostic log
 
+  // iPhone only: Safari's speech engine can get stuck so that nothing brings it
+  // back, not even 停止 then 開始. Only reloading the page gives a brand-new
+  // engine, so on iPhone we reload, keep the transcript, and listen again by itself.
+  const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+    (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.platform));
+  let micWorked = false;    // the microphone worked at least once since the page loaded
+  const session = {
+    get(k) { try { return sessionStorage.getItem(k); } catch { return null; } },
+    set(k, v) { try { sessionStorage.setItem(k, v); return sessionStorage.getItem(k) === v; } catch { return false; } },
+    del(k) { try { sessionStorage.removeItem(k); } catch {} }
+  };
+  // Returns false (and does nothing) if it can't safely reload.
+  function reloadAndStart(keepLines, automatic) {
+    // An automatic reload happens at most once every 30 s, so it can never loop.
+    if (automatic && Date.now() - (+session.get('reloadAt') || 0) < 30000) return false;
+    const saved = keepLines ? lines.map((l) => [l.time.getTime(), l.text]) : [];
+    if (!session.set('lines', JSON.stringify(saved)) || !session.set('autostart', '1')) return false;
+    session.set('reloadAt', String(Date.now()));
+    log('reloading for a fresh speech engine');
+    wantRunning = false;
+    clearTimeout(restartTimer);
+    setStatus('重新啟動中…');
+    location.reload();
+    return true;
+  }
+
   // Remove the cleared text from the start of a new result, if it is there.
   function cutSkipped(t) {
     if (!skipText) return t;
@@ -308,6 +338,7 @@
       log(id + ' start' + old());
       if (rec !== me) return;
       everStarted = true;
+      micWorked = true;
       lastResultAt = Date.now();
       setStatus('🎤 正在聆聽…');
     };
@@ -340,6 +371,7 @@
       // Phones sometimes refuse an automatic restart once, even though the
       // microphone was allowed. Only give up if it never worked or keeps failing.
       if ((blocked || e.error === 'audio-capture') && (!everStarted || failCount > 5)) {
+        if (isIOS && micWorked && reloadAndStart(true, true)) return; // iPhone: fresh engine
         stop();
         setStatus(blocked
           ? '無法使用麥克風：請在瀏覽器設定中允許麥克風權限（iPhone 需開啟 Siri 與聽寫），再按「開始」。'
@@ -422,6 +454,9 @@
 
   function start() {
     log('▶ 開始 pressed');
+    // iPhone: once the engine has been used on this page it may be stuck, so
+    // 開始 always begins with a brand-new one.
+    if (isIOS && micWorked && reloadAndStart(true, false)) return;
     wantRunning = true;
     everStarted = false;
     failCount = 0;
@@ -454,6 +489,17 @@
     log('page ' + document.visibilityState);
     if (document.visibilityState === 'visible' && wantRunning) keepAwake();
   });
+
+  // ---------- after a reload made by the iPhone fix above ----------
+  if (session.get('autostart') === '1') {
+    session.del('autostart');
+    try {
+      JSON.parse(session.get('lines') || '[]').forEach(([t, text]) => addLine(text, new Date(t)));
+    } catch {}
+    session.del('lines');
+    log('reloaded; listening again');
+    start();
+  }
 })();
 </script>
 </body>
