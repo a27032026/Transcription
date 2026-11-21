@@ -99,6 +99,18 @@
   }
   #interim { color: var(--interim); margin: 0; }
   #placeholder { color: var(--dim); font-size: 0.6em; }
+  #debug {
+    margin: 0;
+    padding: 6px 10px;
+    padding-bottom: max(6px, env(safe-area-inset-bottom));
+    max-height: 32vh;
+    overflow-y: auto;
+    background: #102030;
+    color: #9fe8ff;
+    font: 12px/1.35 ui-monospace, Menlo, Consolas, monospace;
+    white-space: pre-wrap;
+    word-break: break-all;
+  }
   #unsupported {
     display: none;
     margin: 24px 16px;
@@ -133,6 +145,7 @@
   <p id="placeholder">說話的內容會顯示在這裡。</p>
   <p id="interim"></p>
 </main>
+<pre id="debug" hidden></pre>
 
 <script>
 (() => {
@@ -140,6 +153,23 @@
   const $ = (id) => document.getElementById(id);
   const toggleBtn = $('toggle'), statusEl = $('status'), main = $('transcript');
   const interimEl = $('interim'), placeholder = $('placeholder');
+
+  // ---------- diagnostic log (open the link with #debug at the end) ----------
+  const VERSION = '2026-11-21 v3';
+  const DEBUG = /debug/i.test(location.hash + location.search);
+  const debugEl = $('debug');
+  const logLines = [], t0 = Date.now();
+  function log(msg) {
+    if (!DEBUG) return;
+    logLines.push(((Date.now() - t0) / 1000).toFixed(1).padStart(6) + 's  ' + msg);
+    if (logLines.length > 40) logLines.shift();
+    debugEl.textContent = logLines.join('\n');
+    debugEl.scrollTop = debugEl.scrollHeight;
+  }
+  if (DEBUG) {
+    debugEl.hidden = false;
+    log('版本 ' + VERSION + ' | ' + navigator.userAgent);
+  }
 
   // ---------- settings (font size, theme) ----------
   const store = {
@@ -201,6 +231,7 @@
   // stop transcription. Instead, the half-finished sentence on screen is
   // remembered and cut off the front of whatever the recognizer sends next.
   $('clear').onclick = () => {
+    log('▶ 全部清除 pressed, listening=' + (SR && wantRunning) + ', on screen="' + interimEl.textContent + '"');
     if (SR && wantRunning) skipText = interimEl.textContent.trim();
     lines.length = 0;
     main.querySelectorAll('.line').forEach((n) => n.remove());
@@ -241,6 +272,7 @@
   let everStarted = false;  // the microphone worked at least once this session
   let failCount = 0;        // errors in a row without any recognized speech
   let skipText = '';        // text cleared by 全部清除 that the recognizer may still send
+  let recCount = 0;         // numbers each recognizer in the diagnostic log
 
   // Remove the cleared text from the start of a new result, if it is there.
   function cutSkipped(t) {
@@ -263,20 +295,28 @@
 
   function startRec() {
     const me = new SR();
+    const id = '#' + (++recCount);
     rec = me;
     finalizing = false;
     me.lang = 'zh-TW';           // 台灣華語（繁體中文）
     me.continuous = !isMobile;   // phones: one sentence per session, then auto-restart
     me.interimResults = true;
     me.maxAlternatives = 1;
+    const old = () => (rec !== me ? ' (old, ignored)' : '');
 
     me.onstart = () => {
+      log(id + ' start' + old());
       if (rec !== me) return;
       everStarted = true;
       lastResultAt = Date.now();
       setStatus('🎤 正在聆聽…');
     };
     me.onresult = (e) => {
+      if (DEBUG) {
+        const r = e.results[e.results.length - 1];
+        log(id + ' result ' + (r && r.isFinal ? 'FINAL' : 'partial') + ' "' + (r ? r[0].transcript : '') + '"' +
+            (skipText ? ' skip="' + skipText + '"' : '') + old());
+      }
       if (rec !== me) return;    // ignore a recognizer we already replaced
       lastResultAt = Date.now();
       failCount = 0;
@@ -292,6 +332,7 @@
       setInterim(interim);
     };
     me.onerror = (e) => {
+      log(id + ' ERROR ' + e.error + (e.message ? ' ' + e.message : '') + old());
       if (rec !== me) return;
       if (e.error === 'no-speech' || e.error === 'aborted') return; // normal; will auto-restart
       failCount++;
@@ -312,6 +353,7 @@
       }
     };
     me.onend = () => {
+      log(id + ' end' + old());
       if (rec !== me) return;
       // Browsers stop recognition after silence or a time limit; restart automatically.
       if (interimEl.textContent) { addLine(interimEl.textContent); setInterim(''); }
@@ -320,6 +362,7 @@
       if (wantRunning) scheduleStart(50);
     };
     lastResultAt = Date.now();
+    log(id + ' created, calling start()');
     me.start();
   }
 
@@ -327,13 +370,14 @@
     clearTimeout(restartTimer);
     restartTimer = setTimeout(() => {
       if (!wantRunning) return;
-      try { startRec(); } catch { scheduleStart(500); }
+      try { startRec(); } catch (err) { log('start() FAILED: ' + err.message); scheduleStart(500); }
     }, delay);
   }
 
   // Throw away the current recognizer and start a new one immediately.
   // keepText: save the unfinished sentence as a line first.
-  function restartNow(keepText) {
+  function restartNow(keepText, why) {
+    log('restart: ' + why);
     if (keepText && interimEl.textContent) addLine(interimEl.textContent);
     setInterim('');
     interimSince = 0;
@@ -353,29 +397,31 @@
       // Some browsers silently stop listening after a few sentences without
       // telling the page. If nothing has come in for a while, start a fresh
       // recognizer. (In real silence this just quietly reconnects.)
-      if (now - lastResultAt > IDLE_MS) restartNow(false);
+      if (now - lastResultAt > IDLE_MS) restartNow(false, 'nothing heard for 10 s');
       return;
     }
     if (finalizing && now - finalizeAt > 2500) {
       // We asked the browser to finish the sentence but it ignored us (common on
       // phones): keep what we have and force a fresh start.
-      restartNow(true);
+      restartNow(true, 'sentence did not finish');
       return;
     }
     if (now - lastResultAt > STALL_MS) {
       // Recognizer froze in the middle of a sentence: keep what we have, restart.
-      restartNow(true);
+      restartNow(true, 'frozen mid-sentence 5 s');
     } else if (!finalizing &&
                (now - interimSince > MAX_INTERIM_MS || interim.length > MAX_INTERIM_CHARS)) {
       // Speaker hasn't paused for a long time: ask the browser to finish this
       // sentence now (it delivers the final text, then onend restarts listening).
       finalizing = true;
       finalizeAt = now;
-      try { rec.stop(); } catch { restartNow(true); }
+      log('long sentence: asking to finish');
+      try { rec.stop(); } catch { restartNow(true, 'stop() failed'); }
     }
   }, 1000);
 
   function start() {
+    log('▶ 開始 pressed');
     wantRunning = true;
     everStarted = false;
     failCount = 0;
@@ -386,6 +432,7 @@
     keepAwake();
   }
   function stop() {
+    log('■ stop');
     wantRunning = false;
     clearTimeout(restartTimer);
     toggleBtn.textContent = '▶ 開始';
@@ -404,6 +451,7 @@
   }
   function releaseAwake() { try { wakeLock && wakeLock.release(); } catch {} wakeLock = null; }
   document.addEventListener('visibilitychange', () => {
+    log('page ' + document.visibilityState);
     if (document.visibilityState === 'visible' && wantRunning) keepAwake();
   });
 })();
