@@ -197,13 +197,16 @@
   }
 
   // Delete all text and start fresh (listening continues if it was on).
+  // The recognizer is left running untouched: interrupting it on iPhone can
+  // stop transcription. Instead, the half-finished sentence on screen is
+  // remembered and cut off the front of whatever the recognizer sends next.
   $('clear').onclick = () => {
+    if (SR && wantRunning) skipText = interimEl.textContent.trim();
     lines.length = 0;
     main.querySelectorAll('.line').forEach((n) => n.remove());
     setInterim('');
     main.insertBefore(placeholder, interimEl);
     main.scrollTop = 0;
-    if (SR && wantRunning) restartNow(false); // drop anything half-recognized
   };
 
   $('save').onclick = () => {
@@ -237,6 +240,14 @@
   let finalizeAt = 0;       // when we asked
   let everStarted = false;  // the microphone worked at least once this session
   let failCount = 0;        // errors in a row without any recognized speech
+  let skipText = '';        // text cleared by 全部清除 that the recognizer may still send
+
+  // Remove the cleared text from the start of a new result, if it is there.
+  function cutSkipped(t) {
+    if (!skipText) return t;
+    const s = t.trimStart();
+    return s.startsWith(skipText) ? s.slice(skipText.length) : t;
+  }
 
   // Limits for long, non-stop speech. Browsers wait for a pause before
   // finishing a sentence; if the speaker never pauses, the sentence keeps
@@ -272,8 +283,9 @@
       let interim = '';
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const r = e.results[i];
-        if (r.isFinal) addLine(r[0].transcript);
-        else interim += r[0].transcript;
+        const text = cutSkipped(r[0].transcript);
+        if (r.isFinal) { addLine(text); skipText = ''; }
+        else interim += text;
       }
       if (interim && !interimSince) interimSince = Date.now();
       if (!interim) interimSince = 0;
@@ -304,6 +316,7 @@
       // Browsers stop recognition after silence or a time limit; restart automatically.
       if (interimEl.textContent) { addLine(interimEl.textContent); setInterim(''); }
       interimSince = 0;
+      skipText = '';
       if (wantRunning) scheduleStart(50);
     };
     lastResultAt = Date.now();
@@ -320,30 +333,15 @@
 
   // Throw away the current recognizer and start a new one immediately.
   // keepText: save the unfinished sentence as a line first.
-  // Phones have only one speech engine. If the new recognizer starts before
-  // the old one has fully shut down, the phone silently kills the new one and
-  // nothing is ever transcribed. So wait for the old one's "end" event first.
-  let restarting = false;
   function restartNow(keepText) {
     if (keepText && interimEl.textContent) addLine(interimEl.textContent);
     setInterim('');
     interimSince = 0;
-    if (restarting) return;      // a restart is already on its way
+    skipText = '';
     const old = rec;
     rec = null;                  // old recognizer's events are now ignored
-    clearTimeout(restartTimer);
-    if (!old) { scheduleStart(150); return; }
-    restarting = true;
-    let done = false;
-    const go = () => {
-      if (done) return;
-      done = true;
-      restarting = false;
-      if (wantRunning && !rec) scheduleStart(isMobile ? 300 : 150);
-    };
-    old.addEventListener('end', go);
-    setTimeout(go, 2000);        // in case the browser never reports the end
-    try { old.abort(); } catch { go(); }
+    try { old && old.abort(); } catch {}
+    scheduleStart(150);
   }
 
   // Watchdog: keeps long, non-stop speech flowing.
