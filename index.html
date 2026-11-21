@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="zh-Hant-TW">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>即時字幕</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="即時字幕">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<style>
+  :root {
+    --bg: #000;
+    --fg: #fff;
+    --dim: #9a9a9a;
+    --interim: #ffd84d;
+    --bar: #161616;
+    --btn: #2a2a2a;
+    --btn-fg: #fff;
+    --accent: #1f9d55;
+    --danger: #d64545;
+    --fs: 48px;
+  }
+  body.light {
+    --bg: #fff;
+    --fg: #000;
+    --dim: #666;
+    --interim: #a15c00;
+    --bar: #eee;
+    --btn: #d9d9d9;
+    --btn-fg: #000;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    height: 100dvh;
+  }
+  header {
+    background: var(--bar);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 12px;
+    padding-top: max(8px, env(safe-area-inset-top));
+    align-items: center;
+  }
+  button {
+    font: inherit;
+    font-size: 18px;
+    background: var(--btn);
+    color: var(--btn-fg);
+    border: 0;
+    border-radius: 10px;
+    padding: 10px 14px;
+    min-height: 48px;
+    cursor: pointer;
+  }
+  button:active { transform: scale(0.97); }
+  #toggle {
+    background: var(--accent);
+    color: #fff;
+    font-weight: bold;
+    min-width: 110px;
+  }
+  #toggle.on { background: var(--danger); }
+  #clear {
+    background: transparent;
+    color: var(--fg);
+    border: 2px solid var(--danger);
+    font-weight: bold;
+  }
+  .size { display: flex; gap: 4px; align-items: center; }
+  .size span { min-width: 3.5em; text-align: center; font-size: 16px; color: var(--dim); }
+  .spacer { flex: 1; }
+  #status {
+    font-size: 15px;
+    color: var(--dim);
+    padding: 4px 16px;
+    min-height: 1.6em;
+  }
+  #status.error { color: var(--danger); font-weight: bold; }
+  main {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 16px 40px;
+    font-size: var(--fs);
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+  }
+  .line { margin: 0 0 0.35em; color: var(--dim); }
+  .line:last-of-type { color: var(--fg); }
+  .line time {
+    display: block;
+    font-size: 14px;
+    color: var(--dim);
+    margin-bottom: 2px;
+  }
+  #interim { color: var(--interim); margin: 0; }
+  #placeholder { color: var(--dim); font-size: 0.6em; }
+  #unsupported {
+    display: none;
+    margin: 24px 16px;
+    padding: 16px;
+    border: 2px solid var(--danger);
+    border-radius: 10px;
+    font-size: 20px;
+    line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+<header>
+  <button id="toggle" type="button">▶ 開始</button>
+  <button id="clear" type="button">🗑 全部清除</button>
+  <div class="size">
+    <button id="smaller" type="button" aria-label="字變小">A−</button>
+    <span id="sizeLabel">48</span>
+    <button id="bigger" type="button" aria-label="字變大">A+</button>
+  </div>
+  <div class="spacer"></div>
+  <button id="theme" type="button">黑/白</button>
+  <button id="full" type="button">全螢幕</button>
+  <button id="save" type="button">下載</button>
+  <button id="install" type="button" hidden>📲 安裝App</button>
+</header>
+<div id="status">按「開始」後允許使用麥克風</div>
+<div id="unsupported">
+  這個瀏覽器不支援語音辨識。<br>
+  請改用 <b>Chrome</b>、<b>Edge</b>（電腦或 Android），或 iPhone/iPad 上的 <b>Safari</b>。
+</div>
+<main id="transcript">
+  <p id="placeholder">說話的內容會顯示在這裡。</p>
+  <p id="interim"></p>
+</main>
+
+<script>
+(() => {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const $ = (id) => document.getElementById(id);
+  const toggleBtn = $('toggle'), statusEl = $('status'), main = $('transcript');
+  const interimEl = $('interim'), placeholder = $('placeholder');
+
+  // ---------- settings (font size, theme) ----------
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch { return d; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch {} }
+  };
+  let fontSize = parseInt(store.get('fs', '48'), 10) || 48;
+  function applySize() {
+    fontSize = Math.max(20, Math.min(160, fontSize));
+    document.documentElement.style.setProperty('--fs', fontSize + 'px');
+    $('sizeLabel').textContent = fontSize;
+    store.set('fs', String(fontSize));
+  }
+  $('smaller').onclick = () => { fontSize -= 8; applySize(); };
+  $('bigger').onclick = () => { fontSize += 8; applySize(); };
+  applySize();
+
+  if (store.get('theme', 'dark') === 'light') document.body.classList.add('light');
+  $('theme').onclick = () => {
+    document.body.classList.toggle('light');
+    store.set('theme', document.body.classList.contains('light') ? 'light' : 'dark');
+  };
+
+  $('full').onclick = () => {
+    const el = document.documentElement;
+    if (document.fullscreenElement) document.exitFullscreen?.();
+    else (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el);
+  };
+
+  // ---------- transcript ----------
+  const lines = [];
+  function nearBottom() { return main.scrollHeight - main.scrollTop - main.clientHeight < 120; }
+  function scrollDown() { main.scrollTop = main.scrollHeight; }
+
+  function addLine(text) {
+    text = text.trim();
+    if (!text) return;
+    placeholder.remove();
+    const stick = nearBottom();
+    const now = new Date();
+    lines.push({ time: now, text });
+    const p = document.createElement('p');
+    p.className = 'line';
+    const t = document.createElement('time');
+    t.textContent = now.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+    p.append(t, document.createTextNode(text));
+    main.insertBefore(p, interimEl);
+    if (stick) scrollDown();
+  }
+  function setInterim(text) {
+    const stick = nearBottom();
+    interimEl.textContent = text;
+    if (text) placeholder.remove();
+    if (stick) scrollDown();
+  }
+
+  // Delete all text and start fresh (listening continues if it was on).
+  $('clear').onclick = () => {
+    lines.length = 0;
+    main.querySelectorAll('.line').forEach((n) => n.remove());
+    setInterim('');
+    main.insertBefore(placeholder, interimEl);
+    main.scrollTop = 0;
+    if (SR && wantRunning) restartNow(false); // drop anything half-recognized
+  };
+
+  $('save').onclick = () => {
+    if (!lines.length) return;
+    const body = lines.map((l) => l.time.toLocaleString('zh-TW') + '  ' + l.text).join('\n');
+    const blob = new Blob([body], { type: 'text/plain;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = '字幕-' + new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-') + '.txt';
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
+
+  function setStatus(msg, isError) {
+    statusEl.textContent = msg;
+    statusEl.classList.toggle('error', !!isError);
+  }
+
+  // ---------- installable app ----------
+  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  }
+  // Android/Chrome/Edge offer an install prompt; show our button when available.
+  let installPrompt = null;
+  const installBtn = $('install');
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    installPrompt = e;
+    installBtn.hidden = false;
+  });
+  installBtn.onclick = async () => {
+    if (!installPrompt) return;
+    installPrompt.prompt();
+    try { await installPrompt.userChoice; } catch {}
+    installPrompt = null;
+    installBtn.hidden = true;
+  };
+  window.addEventListener('appinstalled', () => { installBtn.hidden = true; });
+
+  // ---------- speech recognition ----------
+  if (!SR) {
+    $('unsupported').style.display = 'block';
+    toggleBtn.disabled = true;
+    setStatus('');
+    return;
+  }
+
+  let rec = null, wantRunning = false, restartTimer = null;
+  let lastResultAt = 0;     // when the recognizer last gave us anything
+  let interimSince = 0;     // when the current unfinished sentence began
+  let finalizing = false;   // we asked the recognizer to wrap up the current sentence
+  let everStarted = false;  // the microphone worked at least once this session
+  let failCount = 0;        // errors in a row without any recognized speech
+
+  // Limits for long, non-stop speech. Browsers wait for a pause before
+  // finishing a sentence; if the speaker never pauses, the sentence keeps
+  // growing until the recognizer chokes or silently freezes.
+  const MAX_INTERIM_MS = 15000;   // force a line break after 15 s without a pause
+  const MAX_INTERIM_CHARS = 70;   // ...or after ~70 characters
+  const STALL_MS = 5000;          // no updates for 5 s mid-sentence = frozen
+  const IDLE_MS = 10000;          // nothing at all for 10 s = possibly frozen; refresh
+
+  function startRec() {
+    const me = new SR();
+    rec = me;
+    finalizing = false;
+    me.lang = 'zh-TW';           // 台灣華語（繁體中文）
+    me.continuous = true;
+    me.interimResults = true;
+    me.maxAlternatives = 1;
+
+    me.onstart = () => {
+      if (rec !== me) return;
+      everStarted = true;
+      lastResultAt = Date.now();
+      setStatus('🎤 正在聆聽…');
+    };
+    me.onresult = (e) => {
+      if (rec !== me) return;    // ignore a recognizer we already replaced
+      lastResultAt = Date.now();
+      failCount = 0;
+      let interim = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const r = e.results[i];
+        if (r.isFinal) addLine(r[0].transcript);
+        else interim += r[0].transcript;
+      }
+      if (interim && !interimSince) interimSince = Date.now();
+      if (!interim) interimSince = 0;
+      setInterim(interim);
+    };
+    me.onerror = (e) => {
+      if (rec !== me) return;
+      if (e.error === 'no-speech' || e.error === 'aborted') return; // normal; will auto-restart
+      failCount++;
+      const blocked = e.error === 'not-allowed' || e.error === 'service-not-allowed';
+      // Phones sometimes refuse an automatic restart once, even though the
+      // microphone was allowed. Only give up if it never worked or keeps failing.
+      if ((blocked || e.error === 'audio-capture') && (!everStarted || failCount > 5)) {
+        stop();
+        setStatus(blocked
+          ? '無法使用麥克風：請在瀏覽器設定中允許麥克風權限（iPhone 需開啟 Siri 與聽寫），再按「開始」。'
+          : '找不到麥克風，請確認麥克風已連接，再按「開始」。', true);
+      } else if (e.error === 'network') {
+        setStatus('網路連線問題，正在重試…', true);
+      } else if (blocked || e.error === 'audio-capture') {
+        setStatus('重新連線中…');
+      } else {
+        setStatus('發生錯誤：' + e.error + '，正在重試…', true);
+      }
+    };
+    me.onend = () => {
+      if (rec !== me) return;
+      // Browsers stop recognition after silence or a time limit; restart automatically.
+      if (interimEl.textContent) { addLine(interimEl.textContent); setInterim(''); }
+      interimSince = 0;
+      if (wantRunning) scheduleStart(50);
+    };
+    lastResultAt = Date.now();
+    me.start();
+  }
+
+  function scheduleStart(delay) {
+    clearTimeout(restartTimer);
+    restartTimer = setTimeout(() => {
+      if (!wantRunning) return;
+      try { startRec(); } catch { scheduleStart(500); }
+    }, delay);
+  }
+
+  // Throw away the current recognizer and start a new one immediately.
+  // keepText: save the unfinished sentence as a line first.
+  function restartNow(keepText) {
+    if (keepText && interimEl.textContent) addLine(interimEl.textContent);
+    setInterim('');
+    interimSince = 0;
+    const old = rec;
+    rec = null;                  // old recognizer's events are now ignored
+    try { old && old.abort(); } catch {}
+    scheduleStart(150);
+  }
+
+  // Watchdog: keeps long, non-stop speech flowing.
+  setInterval(() => {
+    if (!wantRunning || !rec) return;
+    const now = Date.now();
+    const interim = interimEl.textContent;
+    if (!interim) {
+      // Some browsers silently stop listening after a few sentences without
+      // telling the page. If nothing has come in for a while, start a fresh
+      // recognizer. (In real silence this just quietly reconnects.)
+      if (now - lastResultAt > IDLE_MS) restartNow(false);
+      return;
+    }
+    if (now - lastResultAt > STALL_MS) {
+      // Recognizer froze in the middle of a sentence: keep what we have, restart.
+      restartNow(true);
+    } else if (!finalizing &&
+               (now - interimSince > MAX_INTERIM_MS || interim.length > MAX_INTERIM_CHARS)) {
+      // Speaker hasn't paused for a long time: ask the browser to finish this
+      // sentence now (it delivers the final text, then onend restarts listening).
+      finalizing = true;
+      try { rec.stop(); } catch { restartNow(true); }
+    }
+  }, 1000);
+
+  function start() {
+    wantRunning = true;
+    everStarted = false;
+    failCount = 0;
+    toggleBtn.textContent = '■ 停止';
+    toggleBtn.classList.add('on');
+    setStatus('啟動中…');
+    try { startRec(); } catch (err) { setStatus('無法啟動：' + err.message, true); }
+    keepAwake();
+  }
+  function stop() {
+    wantRunning = false;
+    clearTimeout(restartTimer);
+    toggleBtn.textContent = '▶ 開始';
+    toggleBtn.classList.remove('on');
+    const old = rec;
+    try { old && old.stop(); } catch {}
+    setStatus('已停止');
+    releaseAwake();
+  }
+  toggleBtn.onclick = () => (wantRunning ? stop() : start());
+
+  // ---------- keep the screen on while listening ----------
+  let wakeLock = null;
+  async function keepAwake() {
+    try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch {}
+  }
+  function releaseAwake() { try { wakeLock && wakeLock.release(); } catch {} wakeLock = null; }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && wantRunning) keepAwake();
+  });
+})();
+</script>
+</body>
+</html>
