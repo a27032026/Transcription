@@ -89,8 +89,7 @@
     line-height: 1.4;
     overflow-wrap: anywhere;
   }
-  .line { margin: 0 0 0.35em; color: var(--dim); }
-  .line:last-of-type { color: var(--fg); }
+  .line { margin: 0 0 0.35em; color: var(--interim); }
   .line time {
     display: block;
     font-size: 14px;
@@ -134,7 +133,6 @@
   <div class="spacer"></div>
   <button id="theme" type="button">黑/白</button>
   <button id="full" type="button">全螢幕</button>
-  <button id="save" type="button">下載</button>
 </header>
 <div id="status">按「開始」後允許使用麥克風</div>
 <div id="unsupported">
@@ -155,7 +153,7 @@
   const interimEl = $('interim'), placeholder = $('placeholder');
 
   // ---------- diagnostic log (open the link with #debug at the end) ----------
-  const VERSION = '2026-11-21 v4';
+  const VERSION = '2026-11-21 v5';
   const DEBUG = /debug/i.test(location.hash + location.search);
   const debugEl = $('debug');
   const logLines = [], t0 = Date.now();
@@ -242,17 +240,6 @@
     // iPhone: Safari's speech engine stops working after this, so start over
     // with a brand-new one (see reloadAndStart below).
     if (listening && isIOS) reloadAndStart(false, false);
-  };
-
-  $('save').onclick = () => {
-    if (!lines.length) return;
-    const body = lines.map((l) => l.time.toLocaleString('zh-TW') + '  ' + l.text).join('\n');
-    const blob = new Blob([body], { type: 'text/plain;charset=utf-8' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = '字幕-' + new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-') + '.txt';
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   };
 
   function setStatus(msg, isError) {
